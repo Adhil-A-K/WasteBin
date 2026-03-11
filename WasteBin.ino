@@ -3,8 +3,8 @@
 #include <ArduinoJson.h>
 
 /* ================= WIFI CONFIG ================= */
-const char* sta_ssid     = "STARVISION WIfi";
-const char* sta_password = "0plmnko9";
+const char* sta_ssid     = "Motridox";
+const char* sta_password = "Bassim@8371";
 
 const char* ap_ssid      = "Westo_ESP32";
 const char* ap_password  = "12345678";
@@ -12,15 +12,20 @@ const char* ap_password  = "12345678";
 /* ================= SERVER ====================== */
 WebServer server(80);
 
-/* ================= SYSTEM DATA ================= */
-int wasteLevel            = 50;
-bool lastUpdatedFromMobile = false;
-unsigned long lastUpdateTime = 0;
+/* ================= LED / TRIGGER =============== */
+#define LED_PIN          2         // ESP32 built-in LED (GPIO 2)
+#define BLINK_INTERVAL   300UL    // ms between blink toggles while active
+#define TRIGGER_DURATION 30000UL  // auto-reset after 30 s (matches app cooldown)
 
-/* ================= COMPRESSOR STATE ============ */
-bool isCompressorActive         = false;
-unsigned long compressorStartTime = 0;
-const unsigned long COMPRESSOR_DURATION_MS = 10000; // 10 seconds
+bool          triggerActive  = false;
+bool          ledState       = false;
+unsigned long triggerStartMs = 0;
+unsigned long lastBlinkMs    = 0;
+
+/* ================= SYSTEM DATA ================= */
+int           wasteLevel            = 50;
+bool          lastUpdatedFromMobile = false;
+unsigned long lastUpdateTime        = 0;
 
 /* ================= HTML DASHBOARD ============== */
 const char* htmlPage = R"rawliteral(
@@ -30,452 +35,315 @@ const char* htmlPage = R"rawliteral(
 <meta charset="UTF-8">
 <title>Westo Inventory Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-
 <style>
-:root{
-  --primary:#2563eb;
-  --bg:#f4f6f9;
-  --card:#ffffff;
-  --success:#22c55e;
-  --danger:#ef4444;
-  --warning:#f59e0b;
-  --muted:#6b7280;
-}
-
-body{
-  margin:0;
-  font-family:system-ui, sans-serif;
-  background:var(--bg);
-}
-
-header{
-  background:var(--primary);
-  color:white;
-  padding:18px;
-  font-size:20px;
-  font-weight:600;
-}
-
-.container{
-  padding:16px;
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
-  gap:16px;
-}
-
-.card{
-  background:var(--card);
-  border-radius:14px;
-  padding:16px;
-  box-shadow:0 10px 25px rgba(0,0,0,.08);
-}
-
-.card h3{
-  margin:0 0 12px;
-  font-size:16px;
-}
-
-.stat{
-  display:flex;
-  justify-content:space-between;
-  margin-bottom:8px;
-  color:var(--muted);
-}
-
-.badge{
-  padding:4px 10px;
-  border-radius:12px;
-  font-size:13px;
-  color:white;
-}
-
-.online   { background:var(--success); }
-.offline  { background:var(--danger);  }
-.running  { background:var(--warning); animation:pulse 1s infinite; }
-.idle     { background:var(--muted);   }
-
-@keyframes pulse{
-  0%,100%{ opacity:1; }
-  50%    { opacity:.6; }
-}
-
-.progress{
-  height:14px;
-  background:#e5e7eb;
-  border-radius:10px;
-  overflow:hidden;
-}
-
-.progress-bar{
-  height:100%;
-  background:linear-gradient(90deg,#22c55e,#16a34a);
-  width:0%;
-  transition:.4s;
-}
-
-/* Compressor timer ring */
-.timer-wrap{
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  margin:14px 0 6px;
-}
-
-.timer-ring{
-  position:relative;
-  width:90px;
-  height:90px;
-}
-
-.timer-ring svg{
-  transform:rotate(-90deg);
-}
-
-.timer-ring circle{
-  fill:none;
-  stroke-width:8;
-}
-
-.ring-bg  { stroke:#e5e7eb; }
-.ring-fg  {
-  stroke:var(--warning);
-  stroke-linecap:round;
-  stroke-dasharray:226;
-  stroke-dashoffset:226;
-  transition:.5s linear;
-}
-
-.timer-label{
-  position:absolute;
-  inset:0;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  font-size:18px;
-  font-weight:700;
-  color:#374151;
-}
-
-input[type=range]{
-  width:100%;
-  margin-top:12px;
-}
-
-button{
-  width:100%;
-  padding:12px;
-  background:var(--primary);
-  border:none;
-  color:white;
-  border-radius:10px;
-  font-size:15px;
-  margin-top:12px;
-  cursor:pointer;
-}
-
-button:disabled{
-  background:#9ca3af;
-  cursor:not-allowed;
-}
-
-.btn-compress{
-  background:#f59e0b;
-}
-
-.btn-compress:hover:not(:disabled){
-  background:#d97706;
-}
-
-.notice{
-  margin-top:10px;
-  padding:10px;
-  border-radius:10px;
-  background:#ecfeff;
-  color:#0369a1;
-  display:none;
-  font-size:14px;
-}
-
-.compress-notice{
-  margin-top:10px;
-  padding:10px;
-  border-radius:10px;
-  background:#fffbeb;
-  color:#92400e;
-  font-size:14px;
-  display:none;
-}
+:root{--primary:#2563eb;--bg:#f4f6f9;--card:#ffffff;--success:#22c55e;--danger:#ef4444;--muted:#6b7280;}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);}
+header{background:var(--primary);color:white;padding:18px;font-size:20px;font-weight:600;}
+.container{padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;}
+.card{background:var(--card);border-radius:14px;padding:16px;box-shadow:0 10px 25px rgba(0,0,0,.08);}
+.card h3{margin:0 0 12px;font-size:16px;}
+.stat{display:flex;justify-content:space-between;margin-bottom:8px;color:var(--muted);}
+.badge{padding:4px 10px;border-radius:12px;font-size:13px;color:white;}
+.online{background:var(--success);}
+.offline{background:var(--danger);}
+.ip-box{font-family:monospace;font-size:13px;background:#f1f5f9;border-radius:8px;padding:6px 10px;color:#1e40af;font-weight:600;}
+.progress{height:14px;background:#e5e7eb;border-radius:10px;overflow:hidden;}
+.progress-bar{height:100%;background:linear-gradient(90deg,#22c55e,#16a34a);width:0%;transition:.4s;}
+input[type=range]{width:100%;margin-top:12px;}
+button{width:100%;padding:12px;background:var(--primary);border:none;color:white;border-radius:10px;font-size:15px;margin-top:12px;}
+.notice{margin-top:10px;padding:10px;border-radius:10px;background:#ecfeff;color:#0369a1;display:none;font-size:14px;}
 </style>
 </head>
-
 <body>
-
 <header>Westo • Smart Waste Dashboard</header>
-
 <div class="container">
 
-  <!-- Network Card -->
+  <!-- Network card -->
   <div class="card">
     <h3>Network Status</h3>
-    <div class="stat">
-      <span>Wi-Fi</span>
-      <span id="wifi" class="badge offline">Checking</span>
-    </div>
-    <div class="stat">
-      <span>Connected Devices</span>
-      <span id="clients">0</span>
-    </div>
+    <div class="stat"><span>Wi-Fi</span><span id="wifi" class="badge offline">Checking</span></div>
+    <div class="stat"><span>Connected Devices</span><span id="clients">0</span></div>
+    <div class="stat" style="margin-top:10px;"><span>AP IP Address</span></div>
+    <div class="ip-box" id="apIp">---.---.---.---</div>
+    <div class="stat" style="margin-top:10px;"><span>STA IP Address</span></div>
+    <div class="ip-box" id="staIp">Not connected</div>
   </div>
 
-  <!-- Waste Level Card -->
+  <!-- Waste level card -->
   <div class="card">
     <h3>Waste Level</h3>
-    <div class="stat">
-      <span>Current Level</span>
-      <span id="levelText">--%</span>
-    </div>
-
-    <div class="progress">
-      <div class="progress-bar" id="progress"></div>
-    </div>
-
+    <div class="stat"><span>Current Level</span><span id="levelText">--%</span></div>
+    <div class="progress"><div class="progress-bar" id="progress"></div></div>
     <input type="range" min="0" max="100" id="slider">
     <button onclick="updateWaste()">Update Waste Level</button>
-
-    <div class="notice" id="notice">
-      🔔 Waste level updated from mobile device
-    </div>
+    <div class="notice" id="notice">🔔 Waste level updated from mobile device</div>
   </div>
 
-  <!-- Compressor Card -->
+  <!-- Compressor card -->
   <div class="card">
-    <h3>Compressor Control</h3>
-
-    <div class="stat">
-      <span>Status</span>
-      <span id="compBadge" class="badge idle">Idle</span>
-    </div>
-
-    <!-- Countdown ring -->
-    <div class="timer-wrap">
-      <div class="timer-ring">
-        <svg viewBox="0 0 90 90" width="90" height="90">
-          <circle class="ring-bg" cx="45" cy="45" r="36"/>
-          <circle class="ring-fg" id="ringFg" cx="45" cy="45" r="36"/>
-        </svg>
-        <div class="timer-label" id="timerLabel">--</div>
-      </div>
-    </div>
-
-    <button id="compBtn" class="btn-compress" onclick="triggerCompressor()">
-      ⚙️ Start Compressor
-    </button>
-
-    <div class="compress-notice" id="compNotice">
-      ⚠️ Compressor is running! Auto-stops in <span id="countdownText">10</span>s
-    </div>
+    <h3>Compressor</h3>
+    <div class="stat"><span>Status</span><span id="triggerBadge" class="badge offline">Idle</span></div>
+    <button onclick="triggerCompress()">Trigger Compressor</button>
   </div>
 
 </div>
-
 <script>
-const COMPRESS_DURATION = 10; // seconds — must match firmware
-let compressorEndTime = null;
-let countdownInterval = null;
-
 function loadStatus(){
-  fetch('/status')
-    .then(r => r.json())
-    .then(d => {
-      // --- Network ---
-      document.getElementById('clients').innerText = d.connectedClients;
-      let wifi = document.getElementById('wifi');
-      if(d.isConnected){
-        wifi.innerText = "Connected";
-        wifi.className = "badge online";
-      } else {
-        wifi.innerText = "Not Connected";
-        wifi.className = "badge offline";
-      }
+  fetch('/status').then(r=>r.json()).then(d=>{
+    document.getElementById('clients').innerText   = d.connectedClients;
+    document.getElementById('levelText').innerText = d.wasteLevel + "%";
+    document.getElementById('progress').style.width = d.wasteLevel + "%";
+    document.getElementById('slider').value        = d.wasteLevel;
+    document.getElementById('apIp').innerText      = d.apIp;
+    document.getElementById('staIp').innerText     = d.staIp || "Not connected";
 
-      // --- Waste Level ---
-      document.getElementById('levelText').innerText = d.wasteLevel + "%";
-      document.getElementById('progress').style.width = d.wasteLevel + "%";
-      document.getElementById('slider').value = d.wasteLevel;
+    let wifi = document.getElementById('wifi');
+    if(d.isConnected){ wifi.innerText="Connected"; wifi.className="badge online"; }
+    else             { wifi.innerText="Not Connected"; wifi.className="badge offline"; }
 
-      if(d.mobileUpdate){
-        document.getElementById('notice').style.display = "block";
-        setTimeout(() => { document.getElementById('notice').style.display = "none"; }, 3000);
-      }
+    if(d.mobileUpdate){
+      document.getElementById('notice').style.display="block";
+      setTimeout(()=>{ document.getElementById('notice').style.display="none"; }, 3000);
+    }
 
-      // --- Compressor ---
-      updateCompressorUI(d.isCompressorActive, d.compressorElapsedMs);
-    });
+    let tb = document.getElementById('triggerBadge');
+    if(d.triggerActive){ tb.innerText="Active"; tb.className="badge online"; }
+    else               { tb.innerText="Idle";   tb.className="badge offline"; }
+  });
 }
-
-function updateCompressorUI(active, elapsedMs){
-  const badge    = document.getElementById('compBadge');
-  const btn      = document.getElementById('compBtn');
-  const notice   = document.getElementById('compNotice');
-  const ring     = document.getElementById('ringFg');
-  const timerLbl = document.getElementById('timerLabel');
-  const CIRC     = 226; // 2 * π * 36
-
-  if(active){
-    badge.innerText  = "Running";
-    badge.className  = "badge running";
-    btn.disabled     = true;
-    notice.style.display = "block";
-
-    // remaining seconds
-    let remainSec = Math.max(0, COMPRESS_DURATION - Math.floor(elapsedMs / 1000));
-    timerLbl.innerText = remainSec + "s";
-    document.getElementById('countdownText').innerText = remainSec;
-
-    // ring fill: fraction of time elapsed
-    let fraction = Math.min(elapsedMs / (COMPRESS_DURATION * 1000), 1);
-    ring.style.strokeDashoffset = CIRC - (CIRC * fraction);
-  } else {
-    badge.innerText  = "Idle";
-    badge.className  = "badge idle";
-    btn.disabled     = false;
-    notice.style.display = "none";
-    timerLbl.innerText = "--";
-    ring.style.strokeDashoffset = CIRC; // empty ring
-  }
-}
-
-function triggerCompressor(){
-  fetch('/compress', { method:'POST' })
-    .then(r => r.text())
-    .then(msg => {
-      console.log("Compressor response:", msg);
-      loadStatus(); // refresh immediately
-    });
-}
-
 function updateWaste(){
   let val = document.getElementById('slider').value;
   fetch('/update?level=' + val);
 }
-
+function triggerCompress(){
+  fetch('/compress', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({trigger: 1})
+  });
+}
 setInterval(loadStatus, 2000);
-loadStatus();
 </script>
-
 </body>
 </html>
 )rawliteral";
 
 /* ================= HELPERS ===================== */
-bool isWiFiConnected(){
+bool isWiFiConnected() {
   return WiFi.status() == WL_CONNECTED;
 }
 
-/* ================= API HANDLERS ================= */
-void handleRoot(){
+/* ================= SERIAL BANNER =============== */
+void printDashboardURLs() {
+  Serial.println();
+  Serial.println("╔══════════════════════════════════════════╗");
+  Serial.println("║       WESTO DASHBOARD - OPEN IN BROWSER  ║");
+  Serial.println("╠══════════════════════════════════════════╣");
+
+  Serial.print("║  📶 AP  (direct): http://");
+  Serial.print(WiFi.softAPIP());
+  Serial.println("/                  ║");
+
+  if (isWiFiConnected()) {
+    Serial.print("║  🌐 STA (wifi):   http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("/                  ║");
+  } else {
+    Serial.println("║  🌐 STA (wifi):   Not connected               ║");
+  }
+
+  Serial.println("╠══════════════════════════════════════════╣");
+  Serial.println("║  API ENDPOINTS:                          ║");
+  Serial.print("║  /status       -> http://");
+  Serial.print(WiFi.softAPIP());
+  Serial.println("/status       ║");
+  Serial.print("║  /update       -> http://");
+  Serial.print(WiFi.softAPIP());
+  Serial.println("/update       ║");
+  Serial.print("║  /compress     -> http://");
+  Serial.print(WiFi.softAPIP());
+  Serial.println("/compress     ║");
+  Serial.print("║  /device/info  -> http://");
+  Serial.print(WiFi.softAPIP());
+  Serial.println("/device/info  ║");
+  Serial.println("╚══════════════════════════════════════════╝");
+  Serial.println();
+}
+
+/* ================= LED HELPERS ================= */
+void activateTrigger() {
+  triggerActive  = true;
+  triggerStartMs = millis();
+  lastBlinkMs    = millis();
+  ledState       = true;
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("[TRIGGER] Compressor activated — LED blinking");
+}
+
+void deactivateTrigger() {
+  triggerActive = false;
+  ledState      = false;
+  digitalWrite(LED_PIN, LOW);
+  Serial.println("[TRIGGER] Compressor cycle complete — LED off");
+}
+
+/* ================= API HANDLERS ================ */
+void handleRoot() {
   server.send(200, "text/html", htmlPage);
 }
 
-void handleStatus(){
-  // Auto-stop compressor after COMPRESSOR_DURATION_MS
-  unsigned long elapsed = 0;
-  if(isCompressorActive){
-    elapsed = millis() - compressorStartTime;
-    if(elapsed >= COMPRESSOR_DURATION_MS){
-      isCompressorActive = false;
-      elapsed = 0;
-    }
-  }
-
-  StaticJsonDocument<256> doc;
-  doc["wasteLevel"]          = wasteLevel;
-  doc["isConnected"]         = isWiFiConnected();
-  doc["isCompressorActive"]  = isCompressorActive;
-  doc["compressorElapsedMs"] = isCompressorActive ? elapsed : 0;  // NEW: send elapsed time for ring UI
-  doc["connectedClients"]    = WiFi.softAPgetStationNum();
-  doc["mobileUpdate"]        = lastUpdatedFromMobile;
-
-  lastUpdatedFromMobile = false; // auto-clear
-
+void handleStatus() {
+  StaticJsonDocument<300> doc;
+  doc["wasteLevel"]       = wasteLevel;
+  doc["isConnected"]      = isWiFiConnected();
+  doc["connectedClients"] = WiFi.softAPgetStationNum();
+  doc["mobileUpdate"]     = lastUpdatedFromMobile;
+  doc["apIp"]             = WiFi.softAPIP().toString();
+  doc["staIp"]            = isWiFiConnected() ? WiFi.localIP().toString() : "";
+  doc["triggerActive"]    = triggerActive;
+  lastUpdatedFromMobile   = false;
   String res;
   serializeJson(doc, res);
   server.send(200, "application/json", res);
 }
 
-void handleUpdate(){
-  if(server.hasArg("level")){
-    wasteLevel = constrain(server.arg("level").toInt(), 0, 100);
+void handleUpdate() {
+  if (server.hasArg("level")) {
+    int newLevel = constrain(server.arg("level").toInt(), 0, 100);
+    Serial.print("[UPDATE] Waste level changed: ");
+    Serial.print(wasteLevel);
+    Serial.print("% → ");
+    Serial.print(newLevel);
+    Serial.println("%");
+    wasteLevel            = newLevel;
     lastUpdatedFromMobile = true;
-    lastUpdateTime = millis();
+    lastUpdateTime        = millis();
   }
   server.send(200, "text/plain", "OK");
 }
 
-void handleCompress(){
-  if(!isCompressorActive){
-    isCompressorActive    = true;
-    compressorStartTime   = millis();
-    server.send(200, "text/plain", "Compressor started");
-  } else {
-    server.send(200, "text/plain", "Compressor already running");
+void handleCompress() {
+  if (server.method() != HTTP_POST) {
+    server.send(405, "text/plain", "Method Not Allowed");
+    return;
   }
+
+  StaticJsonDocument<64> req;
+  DeserializationError err = deserializeJson(req, server.arg("plain"));
+
+  // Default to activate if body is empty or missing "trigger" key
+  int triggerValue = 1;
+  if (!err && req.containsKey("trigger")) {
+    triggerValue = req["trigger"].as<int>();
+  }
+
+  StaticJsonDocument<64> res;
+
+  if (triggerValue == 1) {
+    if (!triggerActive) {
+      activateTrigger();
+      res["status"]  = "activated";
+      res["message"] = "Compressor triggered. LED blinking.";
+    } else {
+      res["status"]  = "already_active";
+      res["message"] = "Compressor already running.";
+    }
+  } else {
+    // trigger == 0 — UI-only disable; hardware runs its own cycle
+    res["status"]  = "acknowledged";
+    res["message"] = "Disable noted (hardware runs its own cycle).";
+  }
+
+  String out;
+  serializeJson(res, out);
+  server.send(200, "application/json", out);
+}
+
+void handleDeviceInfo() {
+  StaticJsonDocument<256> doc;
+  doc["deviceName"]      = "WESTO Smart Bin";
+  doc["firmwareVersion"] = "v1.1.0";
+  doc["macAddress"]      = WiFi.softAPmacAddress();
+  doc["ipAddress"]       = WiFi.softAPIP().toString();
+  doc["mode"]            = "AP + STA";
+  String res;
+  serializeJson(doc, res);
+  server.send(200, "application/json", res);
 }
 
 /* ================= SETUP ======================= */
-void setup(){
+void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n========================================");
-  Serial.println("       Westo ESP32 Booting...");
-  Serial.println("========================================");
 
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  Serial.println("\n\n========== WESTO ESP32 BOOTING ==========");
+
+  // --- AP mode ---
+  Serial.println("[WiFi] Starting AP mode...");
   WiFi.mode(WIFI_AP_STA);
-
-  // --- Start Access Point ---
   WiFi.softAP(ap_ssid, ap_password);
-  Serial.println("\n[AP] Hotspot Started!");
-  Serial.print("[AP] SSID     : "); Serial.println(ap_ssid);
-  Serial.print("[AP] Password : "); Serial.println(ap_password);
-  Serial.print("[AP] IP Addr  : "); Serial.println(WiFi.softAPIP());
+  Serial.print("[WiFi] AP started  | SSID: ");
+  Serial.print(ap_ssid);
+  Serial.print("  | IP: ");
+  Serial.println(WiFi.softAPIP());
 
-  // --- Connect to Station WiFi ---
-  Serial.println("\n[WiFi] Connecting to: " + String(sta_ssid));
+  // --- STA mode ---
+  Serial.print("[WiFi] Connecting to STA: ");
+  Serial.println(sta_ssid);
   WiFi.begin(sta_ssid, sta_password);
 
   int attempts = 0;
-  while(WiFi.status() != WL_CONNECTED && attempts < 20){
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
+  Serial.println();
 
-  if(WiFi.status() == WL_CONNECTED){
-    Serial.println("\n[WiFi] Connected Successfully!");
-    Serial.print("[WiFi] IP Address : "); Serial.println(WiFi.localIP());
-    Serial.print("[WiFi] Signal (RSSI): "); Serial.print(WiFi.RSSI()); Serial.println(" dBm");
+  if (isWiFiConnected()) {
+    Serial.print("[WiFi] STA connected! IP: ");
+    Serial.println(WiFi.localIP());
   } else {
-    Serial.println("\n[WiFi] Connection FAILED — running in AP-only mode.");
+    Serial.println("[WiFi] STA failed — running AP-only mode");
   }
 
-  // --- Start Web Server ---
-  server.on("/",         handleRoot);
-  server.on("/status",   handleStatus);
-  server.on("/update",   handleUpdate);
-  server.on("/compress", HTTP_POST, handleCompress);
-
+  // --- Routes ---
+  server.on("/",            handleRoot);
+  server.on("/status",      handleStatus);
+  server.on("/update",      handleUpdate);
+  server.on("/compress",    handleCompress);
+  server.on("/device/info", handleDeviceInfo);
   server.begin();
+  Serial.println("[Server] HTTP server started on port 80");
 
-  Serial.println("\n========================================");
-  Serial.println("[Server] Web Server Started!");
-  Serial.print("[Dashboard] AP URL  : http://"); Serial.print(WiFi.softAPIP()); Serial.println("/");
-  if(WiFi.status() == WL_CONNECTED){
-    Serial.print("[Dashboard] LAN URL : http://"); Serial.print(WiFi.localIP()); Serial.println("/");
-  }
-  Serial.println("========================================\n");
+  printDashboardURLs();
 }
 
 /* ================= LOOP ======================== */
-void loop(){
+unsigned long lastStatusPrint = 0;
+
+void loop() {
   server.handleClient();
+
+  /* ---- Trigger / LED blink (non-blocking) ---- */
+  if (triggerActive) {
+    unsigned long now = millis();
+
+    if (now - triggerStartMs >= TRIGGER_DURATION) {
+      deactivateTrigger();
+    } else if (now - lastBlinkMs >= BLINK_INTERVAL) {
+      lastBlinkMs = now;
+      ledState    = !ledState;
+      digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    }
+  }
+
+  /* ---- Re-print URL banner every 30 s ---- */
+  if (millis() - lastStatusPrint > 30000) {
+    lastStatusPrint = millis();
+    printDashboardURLs();
+  }
 }
