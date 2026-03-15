@@ -35,6 +35,8 @@
  *   v2.2.0 — Jarvis: 1/16 microstepping (shared MS pins)
  *   v3.0.0 — Jarvis: Library rewrite (StepperDriver + ESP32Servo),
  *            new pinout, single common stepper, cleaner code
+ *   v3.1.0 — Jarvis: Remove lid-compression interlock (prototype testing),
+ *            calibration values updated for actual bin dimensions
  * ===================================================================== */
 
 #include <Arduino.h>
@@ -91,17 +93,17 @@
  *   1. Move plate to TOP manually → read distance from serial → PLATE_TOP_CM
  *   2. Move plate to BOTTOM       → read distance              → PLATE_BOTTOM_CM
  * ===================================================================== */
-#define PLATE_TOP_CM      10.0f
-#define PLATE_BOTTOM_CM   50.0f
+#define PLATE_TOP_CM      5.0f
+#define PLATE_BOTTOM_CM   20.0f
 
 /* ======================== TUNING CONSTANTS =========================== */
 
 // --- Proximity / Lid ---
-#define PROXIMITY_CM         20.0f    // Open lid when person within this distance
+#define PROXIMITY_CM         7.0f    // Open lid when person within this distance
 #define PROXIMITY_CHECK_MS   200UL    // Front sensor poll interval (ms)
 #define PROX_DEBOUNCE        2        // Consecutive reads needed to open lid
-#define LID_OPEN_ANGLE       80       // Servo angle: open (degrees)
-#define LID_CLOSED_ANGLE     0        // Servo angle: closed
+#define LID_OPEN_ANGLE       0        // Servo angle: open (degrees)
+#define LID_CLOSED_ANGLE     80       // Servo angle: closed
 #define LID_HOLD_OPEN_MS     3000UL   // Keep lid open after person leaves (ms)
 
 // --- Compression ---
@@ -206,10 +208,6 @@ void disableStepper() {
 void startCompression() {
   if (compState != COMP_IDLE) {
     Serial.println("[COMP] Already running — ignored");
-    return;
-  }
-  if (lidOpen) {
-    Serial.println("[COMP] Lid is open — delaying compression");
     return;
   }
 
@@ -362,16 +360,7 @@ void handleLid() {
   if ((nowMs - lastProxCheckMs) < PROXIMITY_CHECK_MS) return;
   lastProxCheckMs = nowMs;
 
-  // Force lid closed during compression
-  if (compState != COMP_IDLE) {
-    if (lidOpen) {
-      lidServo.write(LID_CLOSED_ANGLE);
-      lidOpen = false;
-    }
-    proxCount = 0;
-    return;
-  }
-
+  // During compression, keep reading front sensor but don't block compression
   float d = readUltrasonic(FRONT_TRIG, FRONT_ECHO);
   frontDist = (d > 0) ? d : 999.0f;
 
@@ -404,7 +393,6 @@ void handleLid() {
  * ===================================================================== */
 void handleAutoCompress() {
   if (compState != COMP_IDLE) return;
-  if (lidOpen) return;
   if ((millis() - lastCompressMs) >= COMPRESS_EVERY_MS) {
     Serial.println("[AUTO] Timer fired — starting compression");
     startCompression();
@@ -605,14 +593,9 @@ void handleCompress() {
 
   if (triggerValue == 1) {
     if (compState == COMP_IDLE) {
-      if (lidOpen) {
-        res["status"]  = "lid_open";
-        res["message"] = "Cannot compress while lid is open. Wait for lid to close.";
-      } else {
-        startCompression();
-        res["status"]  = "activated";
-        res["message"] = "Compression cycle started.";
-      }
+      startCompression();
+      res["status"]  = "activated";
+      res["message"] = "Compression cycle started.";
     } else {
       res["status"]  = "already_active";
       res["message"] = "Compressor already running.";
@@ -633,7 +616,7 @@ void handleCompress() {
 void handleDeviceInfo() {
   StaticJsonDocument<256> doc;
   doc["deviceName"]      = "WESTO Smart Bin";
-  doc["firmwareVersion"] = "v3.0.0";
+  doc["firmwareVersion"] = "v3.1.0";
   doc["macAddress"]      = WiFi.softAPmacAddress();
   doc["ipAddress"]       = WiFi.softAPIP().toString();
   doc["mode"]            = "AP + STA";
@@ -655,7 +638,7 @@ void handleRoot() {
 void printBanner() {
   Serial.println();
   Serial.println("╔════════════════════════════════════════════╗");
-  Serial.println("║    WESTO SMART BIN v3.0 — LIBRARY ED.     ║");
+  Serial.println("║    WESTO SMART BIN v3.1 — LIBRARY ED.     ║");
   Serial.println("╠════════════════════════════════════════════╣");
   Serial.print("║  AP:  http://");
   Serial.print(WiFi.softAPIP());
@@ -686,7 +669,7 @@ void printBanner() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n\n========== WESTO ESP32 v3.0 BOOTING ==========");
+  Serial.println("\n\n========== WESTO ESP32 v3.1 BOOTING ==========");
 
   // --- LED ---
   pinMode(LED_PIN, OUTPUT);
