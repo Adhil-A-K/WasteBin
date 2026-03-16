@@ -37,6 +37,8 @@
  *            new pinout, single common stepper, cleaner code
  *   v3.1.0 — Jarvis: Remove lid-compression interlock (prototype testing),
  *            calibration values updated for actual bin dimensions
+ *   v3.2.0 — Jarvis: Updated calibration/tuning constants, smooth lid
+ *            sweep (non-blocking incremental servo movement)
  * ===================================================================== */
 
 #include <Arduino.h>
@@ -93,25 +95,29 @@
  *   1. Move plate to TOP manually → read distance from serial → PLATE_TOP_CM
  *   2. Move plate to BOTTOM       → read distance              → PLATE_BOTTOM_CM
  * ===================================================================== */
-#define PLATE_TOP_CM      5.0f
-#define PLATE_BOTTOM_CM   20.0f
+#define PLATE_TOP_CM      7.0f
+#define PLATE_BOTTOM_CM   21.0f
 
 /* ======================== TUNING CONSTANTS =========================== */
 
 // --- Proximity / Lid ---
-#define PROXIMITY_CM         7.0f    // Open lid when person within this distance
-#define PROXIMITY_CHECK_MS   200UL    // Front sensor poll interval (ms)
-#define PROX_DEBOUNCE        2        // Consecutive reads needed to open lid
-#define LID_OPEN_ANGLE       0        // Servo angle: open (degrees)
-#define LID_CLOSED_ANGLE     80       // Servo angle: closed
-#define LID_HOLD_OPEN_MS     3000UL   // Keep lid open after person leaves (ms)
+#define PROXIMITY_CM         9.0f    // Open lid when person within this distance
+#define PROXIMITY_CHECK_MS   200UL   // Front sensor poll interval (ms)
+#define PROX_DEBOUNCE        2       // Consecutive reads needed to open lid
+#define LID_OPEN_ANGLE       5       // Servo angle: open (degrees)
+#define LID_CLOSED_ANGLE     80      // Servo angle: closed
+#define LID_HOLD_OPEN_MS     3000UL  // Keep lid open after person leaves (ms)
+
+// --- Lid sweep (smooth open/close) ---
+#define LID_SWEEP_STEP_MS    15UL    // ms between each degree step (lower = faster)
+#define LID_SWEEP_STEP_DEG   1       // Degrees to move per step
 
 // --- Compression ---
 #define COMPRESS_EVERY_MS    600000UL // Auto-compress interval (10 min)
 #define COMPRESS_TIMEOUT_MS  120000UL // Safety: abort after 2 min
 #define STALL_CHECK_MS       5000UL   // Check for stall every 5s
 #define STALL_THRESHOLD_CM   1.0f     // Plate moved < this = stalled
-#define STALL_CONFIRM        2        // Consecutive stalls needed to confirm
+#define STALL_CONFIRM        4        // Consecutive stalls needed to confirm
 
 // --- Stepper direction ---
 // Negative degrees = plate moves DOWN (compression)
@@ -160,6 +166,11 @@ bool          lidOpen           = false;
 unsigned long lidLastSeenMs     = 0;
 unsigned long lastProxCheckMs   = 0;
 int           proxCount         = 0;
+
+// Smooth lid sweep
+int           lidCurrentAngle   = LID_CLOSED_ANGLE;  // Tracks actual servo angle
+int           lidTargetAngle    = LID_CLOSED_ANGLE;  // Where we want to go
+unsigned long lastSweepMs       = 0;
 
 /* ========================= SYSTEM DATA =============================== */
 int           wasteLevel            = 0;
@@ -353,6 +364,28 @@ void handleCompression() {
 }
 
 /* =====================================================================
+ * LID: Non-blocking smooth sweep (called every loop)
+ *
+ * Moves lidCurrentAngle toward lidTargetAngle by LID_SWEEP_STEP_DEG
+ * every LID_SWEEP_STEP_MS milliseconds instead of jumping directly.
+ * ===================================================================== */
+void handleLidSweep() {
+  if (lidCurrentAngle == lidTargetAngle) return;
+
+  unsigned long nowMs = millis();
+  if ((nowMs - lastSweepMs) < LID_SWEEP_STEP_MS) return;
+  lastSweepMs = nowMs;
+
+  if (lidCurrentAngle < lidTargetAngle) {
+    lidCurrentAngle = min(lidCurrentAngle + LID_SWEEP_STEP_DEG, lidTargetAngle);
+  } else {
+    lidCurrentAngle = max(lidCurrentAngle - LID_SWEEP_STEP_DEG, lidTargetAngle);
+  }
+
+  lidServo.write(lidCurrentAngle);
+}
+
+/* =====================================================================
  * LID: Proximity-based open/close with debounce (called every loop)
  * ===================================================================== */
 void handleLid() {
@@ -370,8 +403,8 @@ void handleLid() {
     if (!lidOpen && proxCount >= PROX_DEBOUNCE) {
       Serial.print("[LID] Person confirmed at ");
       Serial.print(frontDist, 1);
-      Serial.println("cm — opening");
-      lidServo.write(LID_OPEN_ANGLE);
+      Serial.println("cm — opening (sweep)");
+      lidTargetAngle = LID_OPEN_ANGLE;
       lidOpen = true;
     }
     if (lidOpen) {
@@ -381,8 +414,8 @@ void handleLid() {
     // No person
     proxCount = 0;
     if (lidOpen && (nowMs - lidLastSeenMs) >= LID_HOLD_OPEN_MS) {
-      Serial.println("[LID] No person — closing");
-      lidServo.write(LID_CLOSED_ANGLE);
+      Serial.println("[LID] No person — closing (sweep)");
+      lidTargetAngle = LID_CLOSED_ANGLE;
       lidOpen = false;
     }
   }
@@ -616,7 +649,7 @@ void handleCompress() {
 void handleDeviceInfo() {
   StaticJsonDocument<256> doc;
   doc["deviceName"]      = "WESTO Smart Bin";
-  doc["firmwareVersion"] = "v3.1.0";
+  doc["firmwareVersion"] = "v3.2.0";
   doc["macAddress"]      = WiFi.softAPmacAddress();
   doc["ipAddress"]       = WiFi.softAPIP().toString();
   doc["mode"]            = "AP + STA";
@@ -638,7 +671,7 @@ void handleRoot() {
 void printBanner() {
   Serial.println();
   Serial.println("╔════════════════════════════════════════════╗");
-  Serial.println("║    WESTO SMART BIN v3.1 — LIBRARY ED.     ║");
+  Serial.println("║    WESTO SMART BIN v3.2 — LIBRARY ED.     ║");
   Serial.println("╠════════════════════════════════════════════╣");
   Serial.print("║  AP:  http://");
   Serial.print(WiFi.softAPIP());
@@ -669,7 +702,7 @@ void printBanner() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n\n========== WESTO ESP32 v3.1 BOOTING ==========");
+  Serial.println("\n\n========== WESTO ESP32 v3.2 BOOTING ==========");
 
   // --- LED ---
   pinMode(LED_PIN, OUTPUT);
@@ -697,6 +730,8 @@ void setup() {
 
   // --- Servo (ESP32Servo handles LEDC channel allocation) ---
   lidServo.attach(SERVO_PIN);
+  lidCurrentAngle = LID_CLOSED_ANGLE;
+  lidTargetAngle  = LID_CLOSED_ANGLE;
   lidServo.write(LID_CLOSED_ANGLE);
   Serial.println("[SERVO] Lid closed (init)");
 
@@ -759,7 +794,8 @@ unsigned long lastBannerMs = 0;
 
 void loop() {
   server.handleClient();     // HTTP requests
-  handleLid();               // Proximity → lid servo
+  handleLid();               // Proximity → lid target angle
+  handleLidSweep();          // Smooth lid sweep (non-blocking)
   handleCompression();       // Compressor state machine
   handleAutoCompress();      // Timer-based auto compression
   handleLED();               // Status LED blink
